@@ -135,7 +135,85 @@ class DataGenerator(Sequence):
             train_data.append(date + data + price)
         return train_data
             
-    
+    def get_test_data(self):
+        train_data = {}
+        train_data['sequence_data'] = np.zeros((30490, self.seq_len, 19))
+        train_data['item_info'] = np.zeros((30490, 3))
+        train_data['predict_info'] = np.zeros((30490, self.predict_day, 18))     
+
+        
+        data_id = self.data_df['id'].unique().tolist()
+        list_IDs = []
+        for id_ in tqdm(data_id, total=len(data_id), position=0):
+            list_IDs.append([id_, self.date_list[0]])  
+            print(self.date_list[0]) 
+
+        # loop of train_data
+        for batch_num, IDs in tqdm(enumerate(list_IDs), position=0, total=len(list_IDs)):
+            id_, start_date = IDs
+            predict_start_d = int(start_date[2:]) + self.seq_len
+            train_start_d = int(start_date[2:])
+            item_id = '_'.join(id_.split('_')[:3])
+            store_id = '_'.join(id_.split('_')[3:5])
+            dept_id = '_'.join(id_.split('_')[:2])
+#             tmp_sequence_data = []
+#             tmp_predict_info = []
+#             tmp_sequence_label = []
+
+            # get item information
+            train_data['item_info'][batch_num, 0] = self.item_id_label.index(item_id) / 3049
+            train_data['item_info'][batch_num, 1] = self.store_id_label.index(store_id) / 10
+            train_data['item_info'][batch_num, 2] = self.dept_id_label.index(dept_id) / 7
+#             item_info = [self.item_id_label.index(item_id) / 3049]
+#             item_info += [self.store_id_label.index(store_id) / 10]
+#             item_info += [self.dept_id_label.index(dept_id) / 7]
+
+            # make sequence data
+            for i in range(self.seq_len):
+                current_wm_yr_wk = self.date_dict['d_' + str(train_start_d + i)]['wm_yr_wk']
+                date_info = self.date_dict['d_' + str(train_start_d + i)]['encoded_data']
+                if current_wm_yr_wk in self.price_dict[store_id][item_id]:
+                    price = self.price_dict[store_id][item_id][current_wm_yr_wk] / 108 # price normalization
+                else:
+                    price = 0
+#                 sell_count = self.data_df[self.data_df.id == id_]['d_' + str(train_start_d + i)].values[0] / 800 # sell counter normalization
+                try:
+                    sell_count = self.sell_count_dict[id_]['d_' + str(train_start_d + i)]
+                except:
+                    sell_count = 0
+#                 tmp_sequence_data.append(date_info + [price] + [sell_count])
+                for j, data in enumerate(date_info + [price] + [sell_count]):
+                    train_data['sequence_data'][batch_num, i, j] = data
+
+            # make prediction information data
+            for i in range(self.predict_day):
+                current_wm_yr_wk = self.date_dict['d_' + str(predict_start_d + i)]['wm_yr_wk']     
+                date_info = self.date_dict['d_' + str(predict_start_d + i)]['encoded_data']
+                if current_wm_yr_wk in self.price_dict[store_id][item_id]:
+                    price = self.price_dict[store_id][item_id][current_wm_yr_wk] / 108 # price normalization
+                else:
+                    price = 0
+#                 sell_count = self.data_df[self.data_df.id == id_]['d_' + str(predict_start_d + i)].values[0] / 800 # sell counter normalization
+                # sell_count = self.sell_count_dict[id_]['d_' + str(predict_start_d + i)]
+                
+                for j, data in enumerate(date_info + [price]):
+                    train_data['predict_info'][batch_num, i, j] = data
+                
+#                 tmp_predict_info.append(date_info + [price])            
+#                 tmp_sequence_label.append(sell_count)
+
+#             train_data['predict_info'].append(tmp_predict_info)
+#             train_data['sequence_data'].append(tmp_sequence_data)
+#             train_data['item_info'].append(item_info)
+#             label_data.append([tmp_sequence_label])
+            
+#         train_data['predict_info'] = np.array(train_data['predict_info'])
+#         train_data['sequence_data'] = np.array(train_data['sequence_data'])
+#         train_data['item_info'] = np.array(train_data['item_info'])
+#         label_data = np.array(label_data)
+        
+        return train_data
+
     def __data_generation(self, list_IDs_temp):
         # [item_id(3049), store_id(10), dept_id(7), target_price(1, 107.32)]
         # [sell_count(sequence length, 763), price(sell_price(sequence length, 107.32)]
@@ -276,20 +354,23 @@ def attention_model(lr=1e-3):
     return model
 
 class rnn_network():
-    def __init__(self, data_df, calendar_df, sell_price_df, epochs=200):
-        date_list = data_df.columns[6:]
-        self.train_date_list = date_list[:int(len(date_list) * 0.8)]
-        self.validation_date_list = date_list[int(len(date_list) * 0.8):]
-        print(len(self.train_date_list), len(self.validation_date_list))
-        self.train_generator = DataGenerator(data_df[data_df.columns[:6].tolist() + self.train_date_list.tolist()], calendar_df, sell_price_df, seq_len=TRAIN_TIMESEQUENCE, predict_day=PREDICT_TIMESEQUENCE)
-        self.validation_generator = DataGenerator(data_df[data_df.columns[:6].tolist() + self.validation_date_list.tolist()], calendar_df, sell_price_df, seq_len=TRAIN_TIMESEQUENCE, predict_day=PREDICT_TIMESEQUENCE)
-        self.seq_len = self.train_generator.seq_len
-        self.predict_day = self.train_generator.predict_day
+    def __init__(self, data_df, calendar_df, sell_price_df, epochs=200):                
         self.model = attention_model()
         self.epochs=epochs
         self.batch_size=32
+        self.data_df = data_df
+        self.calendar_df = calendar_df
+        self.sell_price_df = sell_price_df
     
-    def train(self):        
+    def train(self):   
+        date_list = self.data_df.columns[6:]
+        self.train_date_list = date_list[:int(len(date_list) * 0.8)]
+        self.validation_date_list = date_list[int(len(date_list) * 0.8):] 
+        self.train_generator = DataGenerator(self.data_df[self.data_df.columns[:6].tolist() + self.train_date_list.tolist()], self.calendar_df, self.sell_price_df, seq_len=TRAIN_TIMESEQUENCE, predict_day=PREDICT_TIMESEQUENCE)
+        self.validation_generator = DataGenerator(self.data_df[self.data_df.columns[:6].tolist() + self.validation_date_list.tolist()], self.calendar_df, self.sell_price_df, seq_len=TRAIN_TIMESEQUENCE, predict_day=PREDICT_TIMESEQUENCE)
+        self.seq_len = self.train_generator.seq_len
+        self.predict_day = self.train_generator.predict_day
+        print(len(self.train_date_list), len(self.validation_date_list))    
         tb_hist = tensorflow.keras.callbacks.TensorBoard(log_dir='./graph_gru_attention', histogram_freq=1, write_graph=True, write_images=True)
         model_path = './predict_gru_attention.h5'  # '{epoch:02d}-{val_loss:.4f}.h5'
         cb_checkpoint = ModelCheckpoint(filepath=model_path, monitor='val_loss', verbose=1, save_best_only=True)
@@ -302,6 +383,29 @@ class rnn_network():
                                            callbacks=[tb_hist, cb_checkpoint, early_stopping])  # , class_weight=class_weights) 
 #         y_predict = self.model.predict({'encoder_input':x_train[0], 'country_onehot':x_train[1], 'target_input': X_train[0][:, -1, 0].reshape(list(X_train[0].shape[:-2]) + [1]), 'flag_input': np.zeros(len(x_train[0]))})
 #         return y_predict, y_train
+
+    def test(self):
+        self.model.load_weights('./predict_gru_attention.h5')
+        self.test_generator = DataGenerator(self.data_df[self.data_df.columns[:6].tolist() + self.data_df.columns[-TRAIN_TIMESEQUENCE - 1 - 7:].tolist()], self.calendar_df, self.sell_price_df, seq_len=TRAIN_TIMESEQUENCE, predict_day=PREDICT_TIMESEQUENCE, shuffle=False, batch_size=len(self.data_df))
+        # print(len(self.test_data_list))
+        print(self.test_generator.data_df.columns)
+        test = self.test_generator.get_test_data()
+        print(test['sequence_data'].shape, test['item_info'].shape, test['predict_info'].shape, len(self.data_df))
+        print(len(self.test_generator.list_IDs))
+        result_list = []
+        for i in tqdm(range(int(30490 / 32))):
+            IDs = self.data_df.loc[i * 32:(i + 1) * 32 - 1].id
+            tmp_dict = {}
+            tmp_dict['sequence_data'] = test['sequence_data'][:32]
+            tmp_dict['item_info'] = test['item_info'][:32]
+            tmp_dict['predict_info'] = test['predict_info'][:32]
+            predict_data = self.model.predict_on_batch(tmp_dict)
+            # print(len(IDs), IDs)
+            for j, id_ in enumerate(IDs):
+                result_list.append([id_] + predict_data.numpy()[j, -28 * 2 : -28].reshape(28).tolist())
+                result_list.append(['_'.join(id_.split('_')[:-1] + ['evaluation'])] + predict_data.numpy()[j, -28 : ].reshape(28).tolist())
+        df = pd.DataFrame(result_list, columns=['id'] + ['f_' + str(i + 1) for i in range(28)])
+        df.to_csv('submission.csv')
 
 
 if __name__ == '__main__':
@@ -323,4 +427,5 @@ if __name__ == '__main__':
     # train_data = test.__getitem__(0)
     # print(train_data)
     train = rnn_network(sales_train_validation, calendar, sell_prices)
-    train.train()
+    # train.train()
+    train.test()

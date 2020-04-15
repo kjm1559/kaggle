@@ -320,19 +320,30 @@ class corona19_predict:
             
 #             confirmed_cases = int(bc * (1 + confirmed_cases_increase_rate))
 #             fatalities = int(confirmed_cases * mortality_rate)
-            predict_confirmed_cases.append(confirmed_cases_increase_rate[0])
-            predict_fatalities.append(mortality_rate[0])
-            if len(self.target_df[(self.target_df.Date == itest.Date) & (self.target_df.country_label == country_label)]) == 0:
+            # predict_confirmed_cases.append(confirmed_cases_increase_rate[0])
+            # predict_fatalities.append(mortality_rate[0])
+            t_df = self.target_df[(self.target_df.Date == itest.Date) & (self.target_df.country_label == country_label)]
+            if len(t_df) == 0:
 #                 print(itest.Date, confirmed_cases, fatalities, confirmed_cases_increase_rate, mortality_rate)
                 # add new predict data
                 new_data = [-1, itest.Province_State, itest.Country_Region, itest.Date, confirmed_cases_increase_rate[0], mortality_rate[0]]
                 new_data += [0] * (len(self.target_df.columns) - len(new_data))
                 self.target_df.loc[len(self.target_df)] = new_data#[-1, itest.Province_State, itest.Country_Region, itest.Date, round(confirmed_cases_increase_rate[0]), round(mortality_rate[0]), 0, 0, 0, 0, 0]
-                self.target_df = self.target_df.sort_values(by='Date')
-                self.target_df = self.target_df.sort_values(by='Province_State')
-                self.target_df = self.target_df.sort_values(by='Country_Region')
-                self.cal_increase_rate(self.target_df, self.population_df)
+                self.target_df.loc[len(self.target_df) - 1, 'ConfirmedCases_diff'] = confirmed_cases_increase_rate[0] - bc
+                self.target_df.loc[len(self.target_df) - 1, 'ConfirmedCases_diff_percent'] = (confirmed_cases_increase_rate[0] - bc) / bc
+                self.target_df.loc[len(self.target_df) - 1, 'Fatalities_diff'] = mortality_rate[0] - bf
+                self.target_df.loc[len(self.target_df) - 1, 'Fatalities_diff_percent'] = (mortality_rate[0] - bf) / bf
+                self.target_df.loc[len(self.target_df) - 1, 'country_label'] = country_label
+                # self.target_df = self.target_df.sort_values(by='Date')
+                # self.target_df = self.target_df.sort_values(by='Province_State')
+                # self.target_df = self.target_df.sort_values(by='Country_Region')
+                # self.cal_increase_rate(self.target_df, self.population_df)
                 data_df = self.target_df[self.target_df.country_label == country_label]
+                predict_confirmed_cases.append(confirmed_cases_increase_rate[0])
+                predict_fatalities.append(mortality_rate[0])
+            else:
+                predict_confirmed_cases.append(t_df.ConfirmedCases.values[0])
+                predict_fatalities.append(t_df.Fatalities.values[0])
                 
         test_df['ConfirmedCases'] = predict_confirmed_cases
         test_df['Fatalities'] = predict_fatalities
