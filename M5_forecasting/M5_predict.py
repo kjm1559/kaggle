@@ -51,7 +51,7 @@ class DataGenerator(Sequence):
         list_IDs = []
         print('Create data id')        
         for id_ in tqdm(data_id, total=len(data_id), position=0):
-            for i in range(0, len(target_date), 7):
+            for i in range(0, len(target_date), self.predict_day):
                 start_date = target_date[i]                
                 if start_date in self.sell_count_dict[id_]:
                     # print(id_)
@@ -83,8 +83,8 @@ class DataGenerator(Sequence):
             date_dict[idata.d]['encoded_data'] += np.eye(2)[idata.snap_CA].tolist()
             date_dict[idata.d]['encoded_data'] += np.eye(2)[idata.snap_TX].tolist()
             date_dict[idata.d]['encoded_data'] += np.eye(2)[idata.snap_WI].tolist()
-            date_dict[idata.d]['encoded_data'] += [idata.wday]#np.eye(7)[idata.wday - 1].tolist()
-            date_dict[idata.d]['encoded_data'] += [idata.month]
+            date_dict[idata.d]['encoded_data'] += [idata.wday / 7]#np.eye(7)[idata.wday - 1].tolist()
+            date_dict[idata.d]['encoded_data'] += [idata.month / 12]
             date_dict[idata.d]['wm_yr_wk'] = idata.wm_yr_wk
         return date_dict
     
@@ -137,9 +137,9 @@ class DataGenerator(Sequence):
             
     def get_test_data(self):
         train_data = {}
-        train_data['sequence_data'] = np.zeros((30490, self.seq_len, 19))
+        train_data['sequence_data'] = np.zeros((30490, self.seq_len, 14))
         train_data['item_info'] = np.zeros((30490, 3))
-        train_data['predict_info'] = np.zeros((30490, self.predict_day, 18))     
+        train_data['predict_info'] = np.zeros((30490, self.predict_day, 13))     
 
         
         data_id = self.data_df['id'].unique().tolist()
@@ -222,9 +222,9 @@ class DataGenerator(Sequence):
 #         label_data = []
         
         train_data = {}
-        train_data['sequence_data'] = np.zeros((len(list_IDs_temp), self.seq_len, 19))
+        train_data['sequence_data'] = np.zeros((len(list_IDs_temp), self.seq_len, 14))
         train_data['item_info'] = np.zeros((len(list_IDs_temp), 3))
-        train_data['predict_info'] = np.zeros((len(list_IDs_temp), self.predict_day, 18))
+        train_data['predict_info'] = np.zeros((len(list_IDs_temp), self.predict_day, 13))
         label_data = np.zeros((len(list_IDs_temp), self.predict_day, 1))
 
         # loop of train_data
@@ -306,8 +306,8 @@ def attention_mechanism(days, input_):
     return x
 
 def attention_model(lr=1e-3):
-    predict_info = Input(shape=(None, 18), name='predict_info')
-    sequence_data = Input(shape=(None, 19), name='sequence_data')    
+    predict_info = Input(shape=(None, 13), name='predict_info')
+    sequence_data = Input(shape=(None, 14), name='sequence_data')    
     item_info = Input(shape=(3,), name='item_info')
     
     x = Masking(mask_value=0, input_shape=(None, 19))(sequence_data)
@@ -393,19 +393,23 @@ class rnn_network():
         print(test['sequence_data'].shape, test['item_info'].shape, test['predict_info'].shape, len(self.data_df))
         print(len(self.test_generator.list_IDs))
         result_list = []
-        for i in tqdm(range(int(30490 / 32))):
+        result_list_e = []
+        for i in tqdm(range(int(30490 / 32) + 1)):
             IDs = self.data_df.loc[i * 32:(i + 1) * 32 - 1].id
             tmp_dict = {}
-            tmp_dict['sequence_data'] = test['sequence_data'][:32]
-            tmp_dict['item_info'] = test['item_info'][:32]
-            tmp_dict['predict_info'] = test['predict_info'][:32]
+            tmp_dict['sequence_data'] = test['sequence_data'][i * 32:(i + 1) * 32]
+            tmp_dict['item_info'] = test['item_info'][i * 32:(i + 1) * 32]
+            tmp_dict['predict_info'] = test['predict_info'][i * 32:(i + 1) * 32]
+            print(tmp_dict['sequence_data'][0][-120:].tolist())
             predict_data = self.model.predict_on_batch(tmp_dict)
             # print(len(IDs), IDs)
             for j, id_ in enumerate(IDs):
-                result_list.append([id_] + predict_data.numpy()[j, -28 * 2 : -28].reshape(28).tolist())
-                result_list.append(['_'.join(id_.split('_')[:-1] + ['evaluation'])] + predict_data.numpy()[j, -28 : ].reshape(28).tolist())
-        df = pd.DataFrame(result_list, columns=['id'] + ['f_' + str(i + 1) for i in range(28)])
-        df.to_csv('submission.csv')
+                result_list.append([id_] + (predict_data.numpy()[j, -28 * 2 : -28] * 800).reshape(28).tolist())
+                result_list_e.append(['_'.join(id_.split('_')[:-1] + ['evaluation'])] + (predict_data.numpy()[j, -28 : ] * 800).reshape(28).tolist())
+        df = pd.DataFrame(result_list, columns=['id'] + ['F' + str(i + 1) for i in range(28)])
+        df2 = pd.DataFrame(result_list_e, columns=['id'] + ['F' + str(i + 1) for i in range(28)])
+        df = pd.concat([df, df2])
+        df.to_csv('submission.csv', index=False)
 
 
 if __name__ == '__main__':
