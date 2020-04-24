@@ -20,13 +20,14 @@ import numpy as np
 
 
 class DataGenerator(Sequence):
-    def __init__(self, data_df, calendar_df, sell_price_df, seq_len=30 * 4, predict_day=30 * 2, skip_day=30 * 2, batch_size=32, shuffle=True):
+    def __init__(self, data_df, calendar_df, sell_price_df, max_count, seq_len=30 * 4, predict_day=30 * 2, skip_day=30, batch_size=32, shuffle=True):
         self.data_df = data_df
         self.calendar_df = calendar_df
         self.sell_price_df = sell_price_df
         self.seq_len = seq_len
         self.predict_day = predict_day
         self.batch_size = batch_size
+        self.max_count = max_count
         self.event1_label = self.calendar_df['event_name_1'].unique().tolist()
         self.event_type_label = self.calendar_df['event_type_1'].unique().tolist()
         self.event2_label = self.calendar_df['event_name_2'].unique().tolist()
@@ -91,14 +92,14 @@ class DataGenerator(Sequence):
     def __make_sell_count_dict(self):
         sell_count_dict = {}
         print('Create sell count dict')
-        for idata in tqdm(self.data_df.itertuples(), total=len(self.data_df), position=0):
+        for j, idata in tqdm(enumerate(self.data_df.itertuples()), total=len(self.data_df), position=0):
 #             print(idata)
             sell_count_dict[idata[1]] = {}
             for i, index in enumerate(self.data_df.columns[6:]):
                 store_id = '_'.join(idata[1].split('_')[3:5])
                 item_id = '_'.join(idata[1].split('_')[:3])
-                if self.date_dict[index]['wm_yr_wk'] in self.price_dict[store_id][item_id]:
-                    sell_count_dict[idata[1]][index] = idata[i + 7] / 800
+                if self.date_dict[index]['wm_yr_wk'] in self.price_dict[store_id][item_id]:                    
+                    sell_count_dict[idata[1]][index] = idata[i + 7] / self.max_count[j]#800
         return sell_count_dict
     
     def __len__(self):
@@ -305,7 +306,7 @@ def attention_mechanism(days, input_):
     x = Dense(days, activation='softmax')(x)
     return x
 
-def attention_model(lr=1e-3):
+def attention_model(lr=1e-5):
     predict_info = Input(shape=(None, 13), name='predict_info')
     sequence_data = Input(shape=(None, 14), name='sequence_data')    
     item_info = Input(shape=(3,), name='item_info')
@@ -350,7 +351,7 @@ def attention_model(lr=1e-3):
     
     optimizer = Adam(lr=lr, name='adam')
     model = Model([sequence_data, item_info, predict_info], outputs, name='gru_network')
-    model.compile(optimizer=optimizer, loss=rmsse)
+    model.compile(optimizer=optimizer, loss='mse')
     return model
 
 class rnn_network():
@@ -361,22 +362,23 @@ class rnn_network():
         self.data_df = data_df
         self.calendar_df = calendar_df
         self.sell_price_df = sell_price_df
+        self.max_count = np.max(data_df[data_df.columns[6:]].values, axis=1)        
     
     def train(self):   
         date_list = self.data_df.columns[6:]
         self.train_date_list = date_list[:int(len(date_list) * 0.8)]
         self.validation_date_list = date_list[int(len(date_list) * 0.8):] 
-        self.train_generator = DataGenerator(self.data_df[self.data_df.columns[:6].tolist() + self.train_date_list.tolist()], self.calendar_df, self.sell_price_df, seq_len=TRAIN_TIMESEQUENCE, predict_day=PREDICT_TIMESEQUENCE)
-        self.validation_generator = DataGenerator(self.data_df[self.data_df.columns[:6].tolist() + self.validation_date_list.tolist()], self.calendar_df, self.sell_price_df, seq_len=TRAIN_TIMESEQUENCE, predict_day=PREDICT_TIMESEQUENCE)
+        self.train_generator = DataGenerator(self.data_df[self.data_df.columns[:6].tolist() + self.train_date_list.tolist()], self.calendar_df, self.sell_price_df, self.max_count, seq_len=TRAIN_TIMESEQUENCE, predict_day=PREDICT_TIMESEQUENCE)
+        self.validation_generator = DataGenerator(self.data_df[self.data_df.columns[:6].tolist() + self.validation_date_list.tolist()], self.calendar_df, self.sell_price_df, self.max_count, seq_len=TRAIN_TIMESEQUENCE, predict_day=PREDICT_TIMESEQUENCE)
         self.seq_len = self.train_generator.seq_len
         self.predict_day = self.train_generator.predict_day
         print(len(self.train_date_list), len(self.validation_date_list))    
-        tb_hist = tensorflow.keras.callbacks.TensorBoard(log_dir='./graph_gru_attention', histogram_freq=1, write_graph=True, write_images=True)
-        model_path = './predict_gru_attention.h5'  # '{epoch:02d}-{val_loss:.4f}.h5'
+        tb_hist = tensorflow.keras.callbacks.TensorBoard(log_dir='./graph_gru_attention3', histogram_freq=1, write_graph=True, write_images=True)
+        model_path = './predict_gru_attention2.h5'  # '{epoch:02d}-{val_loss:.4f}.h5'
         cb_checkpoint = ModelCheckpoint(filepath=model_path, monitor='val_loss', verbose=1, save_best_only=True)
         early_stopping = EarlyStopping(patience=10)
 
-        history = self.model.fit_generator(generator=self.train_generator, \
+        history = self.model.fit(self.train_generator, \
                                            validation_data=self.validation_generator, \
                                            epochs=self.epochs, \
 #                                            use_multiprocessing=True, workers=6,
@@ -385,8 +387,8 @@ class rnn_network():
 #         return y_predict, y_train
 
     def test(self):
-        self.model.load_weights('./predict_gru_attention.h5')
-        self.test_generator = DataGenerator(self.data_df[self.data_df.columns[:6].tolist() + self.data_df.columns[-TRAIN_TIMESEQUENCE - 1 - 7:].tolist()], self.calendar_df, self.sell_price_df, seq_len=TRAIN_TIMESEQUENCE, predict_day=PREDICT_TIMESEQUENCE, shuffle=False, batch_size=len(self.data_df))
+        self.model.load_weights('./predict_gru_attention2.h5')
+        self.test_generator = DataGenerator(self.data_df[self.data_df.columns[:6].tolist() + self.data_df.columns[-TRAIN_TIMESEQUENCE - 1 - 7:].tolist()], self.calendar_df, self.sell_price_df, self.max_count, seq_len=TRAIN_TIMESEQUENCE, predict_day=PREDICT_TIMESEQUENCE, shuffle=False, batch_size=len(self.data_df))
         # print(len(self.test_data_list))
         print(self.test_generator.data_df.columns)
         test = self.test_generator.get_test_data()
@@ -400,12 +402,17 @@ class rnn_network():
             tmp_dict['sequence_data'] = test['sequence_data'][i * 32:(i + 1) * 32]
             tmp_dict['item_info'] = test['item_info'][i * 32:(i + 1) * 32]
             tmp_dict['predict_info'] = test['predict_info'][i * 32:(i + 1) * 32]
-            print(tmp_dict['sequence_data'][0][-120:].tolist())
+            max_count = self.max_count[i * 32:(i + 1) * 32]
+            # print(tmp_dict['sequence_data'][0][-120:].tolist())
             predict_data = self.model.predict_on_batch(tmp_dict)
             # print(len(IDs), IDs)
             for j, id_ in enumerate(IDs):
-                result_list.append([id_] + (predict_data.numpy()[j, -28 * 2 : -28] * 800).reshape(28).tolist())
-                result_list_e.append(['_'.join(id_.split('_')[:-1] + ['evaluation'])] + (predict_data.numpy()[j, -28 : ] * 800).reshape(28).tolist())
+                if id_ == 'FOODS_1_018_TX_2_validation':
+                    print(id_, predict_data[j].numpy().tolist(), max_count[j])
+                if id_ == 'FOODS_1_017_TX_2_validation':
+                    print(id_, predict_data[j].numpy().tolist(), max_count[j])
+                result_list.append([id_] + (predict_data.numpy()[j, -28 * 2 : -28] * max_count[j]).reshape(28).tolist())
+                result_list_e.append(['_'.join(id_.split('_')[:-1] + ['evaluation'])] + (predict_data.numpy()[j, -28 : ] * max_count[j]).reshape(28).tolist())
         df = pd.DataFrame(result_list, columns=['id'] + ['F' + str(i + 1) for i in range(28)])
         df2 = pd.DataFrame(result_list_e, columns=['id'] + ['F' + str(i + 1) for i in range(28)])
         df = pd.concat([df, df2])
