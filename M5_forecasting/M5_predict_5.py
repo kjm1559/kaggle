@@ -1,6 +1,7 @@
 from  datetime import datetime, timedelta
 import gc
 import numpy as np, pandas as pd
+import tensorflow.keras as keras
 
 CAL_DTYPES={"event_name_1": "category", "event_name_2": "category", "event_type_1": "category", 
          "event_type_2": "category", "weekday": "category", 'wm_yr_wk': 'int16', "wday": "int16",
@@ -12,6 +13,49 @@ max_lags = 57
 tr_last = 1913
 fday = datetime(2016,4, 25) 
 # fday = datetime(2016,4, 24) 
+
+class DataGenerator(keras.utils.Sequence):
+    'Generates data for Keras'
+    def __init__(self, df, shuffle=True):
+        'Initialization'
+        # self.dim = dim
+        # self.batch_size = batch_size
+        # self.labels = labels
+        # self.list_IDs = list_IDs
+        # self.n_channels = n_channels
+        # self.n_classes = n_classes
+        self.shuffle = shuffle
+        self.df = df
+        self.list_IDs = self.df.d.unique().tolist()
+        self.on_epoch_end()
+
+    def __len__(self):
+        'Denotes the number of batches per epoch'
+        return int(len(self.list_IDs))
+
+    def __getitem__(self, index):
+        'Generate one batch of data'
+        # Generate indexes of the batch
+        indexes = self.indexes[index]
+
+        # Generate data
+        X, y = self.__data_generation(indexes)
+
+        return X, y
+
+    def on_epoch_end(self):
+        'Updates indexes after each epoch'
+        self.indexes = np.arange(len(self.list_IDs))
+        if self.shuffle == True:
+            np.random.shuffle(self.indexes)
+
+    def __data_generation(self, index):
+        'Generates data containing batch_size samples' # X : (n_samples, *dim, n_channels)
+        tmp_df = self.df[self.df.d == self.list_IDs[index]]
+        X = make_X(tmp_df)
+        y = np.concatenate((tmp_df[['sales', 'sales_diff_year', 'sales_price_86']].to_numpy(), np.ones((len(tmp_df), 1))), axis=-1)
+       
+        return X, y
 
 def create_dt(is_train = True, nrows = None, first_day = 1200):
     prices = pd.read_csv("sell_prices.csv", dtype = PRICE_DTYPES)
@@ -54,15 +98,19 @@ def create_dt(is_train = True, nrows = None, first_day = 1200):
         # dt['sales_diff'] = dt.groupby(by='id')['sales'].diff().pow(2).shift(periods=1).rolling(28).sum() / 28
         dt['sales_diff'] = dt.groupby(by='id')['sales'].diff()
         dt['sales_diff'] = dt.groupby(by='id')['sales_diff'].shift(periods=1).pow(2)
-        dt['sales_diff_year'] = dt.groupby(by='id')['sales_diff'].rolling(84).mean().reset_index(0, drop=True)
+        dt['sales_diff_year'] = dt.groupby(by='id')['sales_diff'].rolling(28).mean().reset_index(0, drop=True)
         # dt['sales_diff_56'] = dt.groupby(by='id')['sales_diff'].rolling(56).mean().reset_index(0, drop=True)
         # dt['sales_diff_28'] = dt.groupby(by='id')['sales_diff'].rolling(28).mean().reset_index(0, drop=True)
         # dt['sales_diff_7'] = dt.groupby(by='id')['sales_diff'].rolling(7).mean().reset_index(0, drop=True)
-    # dt['sales_before'] = dt.groupby(by='id')['sales'].shift(periods=1) / 800
-        # dt.loc[dt.sales_diff == 0, 'sales_diff'] = 1
+        
+
+    
     
     dt = dt.merge(cal, on= "d", copy = False)
     dt = dt.merge(prices, on = ["store_id", "item_id", "wm_yr_wk"], copy = False)
+    if is_train:
+        dt['sales_price'] = dt['sales'] * dt['sell_price']
+        dt['sales_price_86'] = dt.groupby(by='id')['sales_price'].rolling(28).sum().reset_index(0, drop=True)
     
     return dt
 
@@ -77,8 +125,8 @@ def create_fea(dt):
         for lag,lag_col in zip(lags, lag_cols):
             dt[f"rmean_{lag}_{win}"] = dt[["id", lag_col]].groupby("id")[lag_col].transform(lambda x : x.rolling(win).mean())
 
-    dt['sales_before'] = dt.groupby(by='id')['sales'].shift(periods=1) / 800
-    
+    for i in range(6):
+        dt['sales_before_' + str(i+1)] = dt.groupby(by='id')['sales'].shift(periods=(i+1)) 
     
     date_features = {
         
@@ -129,13 +177,21 @@ def rmsle(pred, true):
 def rmsse(true, pred):
     assert pred.shape[0]==true.shape[0]
     print(pred.shape, true[:,0:1].shape)
-    loss_1 = K.mean(K.square(true[:, 0:1] - pred) / K.clip(true[:, 1:2], 1, 36000))
+    loss_1 = K.mean(K.square(true[:, 0:1] - (pred * 800)) / K.clip(true[:, 1:2], 1e-8, 36000))
     # loss_7 = K.mean(K.square(true[:, 0:1] - pred) / K.clip(true[:, 2:3], 1, 36000))
     # loss_28 = K.mean(K.square(true[:, 0:1] - pred) / K.clip(true[:, 3:4], 1, 36000)) 
     # loss_56 = K.mean(K.square(true[:, 0:1] - pred) / K.clip(true[:, 4:5], 1, 36000)) 
     # return 0.1*loss_1 + 0.3*loss_7 + 0.6*loss_28
     return loss_1
     # return K.mean(K.square(true[:, 0:1] - pred))
+
+def wrmsse(true, pred):
+    assert pred.shape[0]==true.shape[0]
+    sqrt_data = K.sqrt(K.square(true[:, 0:1] - (pred)) / K.clip(true[:, 1:2], 0.03571428571428571, K.max(true[:, 1:2])) + 1e-18) # 같은 제품일 경우 고려, 기간이 같아야함
+    sales_sum = K.sum(true[:, 2:3])
+    loss = K.sum((sqrt_data * true[:, 2:3]) / sales_sum)
+    rmsse = K.sum(sqrt_data) # rmsse
+    return (loss + rmsse) / K.sum(true[:, 3])
 
 def resnet_layer(inputs,
                  num_filters=16,
@@ -277,8 +333,9 @@ def resnet_v2(inputs, depth=11, num_classes=1):
     # return model
     return outputs
 
+# mse, rmsse, wrmsse ensemble model make ->
 
-def predict_model(input_size, epochs=200, lr=1e-3):    
+def classification_model(input_size, epochs=200, lr=1e-3):    
     inputs = Input(shape=input_size, name='inputs')
 
     # Embedding input
@@ -346,13 +403,13 @@ def predict_model(input_size, epochs=200, lr=1e-3):
 
     x = Concatenate(-1)([x_deep, x_res])
 
-    x = BatchNormalization()(x)    
-    x = Dense(64, activation='relu')(x)
-    x = BatchNormalization()(x)    
-    x = Dense(32, activation='relu')(x)
-    x = BatchNormalization()(x)    
-    x = Dense(16, activation='relu')(x)
-    x = Concatenate(-1)([inputs, x])
+    # x = BatchNormalization()(x)    
+    # x = Dense(16, activation='relu')(x)
+    # x = BatchNormalization()(x)    
+    # x = Dense(8, activation='relu')(x)
+    # x = BatchNormalization()(x)    
+    # x = Dense(128, activation='relu')(x)
+    # x = Concatenate(-1)([inputs, x])
     outputs = Dense(1, activation='linear')(x)
     # outputs = resnet_v2(x)
     
@@ -366,23 +423,124 @@ def predict_model(input_size, epochs=200, lr=1e-3):
 
     }
     model = Model(input_dic, outputs, name='predict_model')
-    model.compile(optimizer=optimizer, loss=rmsse)
+    model.compile(optimizer=optimizer, loss='binary_crossentropy', metrics=['acc'])
+    return model 
+
+def predict_model(input_size, epochs=200, lr=1e-3):    
+    inputs = Input(shape=input_size, name='inputs')
+
+    # Embedding input
+    wday_input = Input(shape=(1,), name='wday')
+    month_input = Input(shape=(1,), name='month')
+    year_input = Input(shape=(1,), name='year')
+    mday_input = Input(shape=(1,), name='mday')
+    quarter_input = Input(shape=(1,), name='quarter')
+    event_name_1_input = Input(shape=(1,), name='event_name_1')
+    event_type_1_input = Input(shape=(1,), name='event_type_1')
+    event_name_2_input = Input(shape=(1,), name='event_name_2')
+    event_type_2_input = Input(shape=(1,), name='event_type_2')
+    item_id_input = Input(shape=(1,), name='item_id')
+    dept_id_input = Input(shape=(1,), name='dept_id')
+    store_id_input = Input(shape=(1,), name='store_id')
+    cat_id_input = Input(shape=(1,), name='cat_id')
+    state_id_input = Input(shape=(1,), name='state_id')
+    snap_CA_input = Input(shape=(1,), name='snap_CA')
+    snap_TX_input = Input(shape=(1,), name='snap_TX')
+    snap_WI_input = Input(shape=(1,), name='snap_WI')
+
+
+    wday_emb = Flatten()(Embedding(7, 1)(wday_input))
+    month_emb = Flatten()(Embedding(12, 2)(month_input))
+    year_emb = Flatten()(Embedding(6, 1)(year_input))
+    mday_emb = Flatten()(Embedding(31, 2)(mday_input))
+    quarter_emb = Flatten()(Embedding(4, 1)(quarter_input))
+    event_name_1_emb = Flatten()(Embedding(31, 2)(event_name_1_input))
+    event_type_1_emb = Flatten()(Embedding(5, 1)(event_type_1_input))
+    event_name_2_emb = Flatten()(Embedding(5, 1)(event_name_2_input))
+    event_type_2_emb = Flatten()(Embedding(5, 1)(event_type_2_input))
+
+    item_id_emb = Flatten()(Embedding(3049, 4)(item_id_input))
+    dept_id_emb = Flatten()(Embedding(7, 1)(dept_id_input))
+    store_id_emb = Flatten()(Embedding(10, 1)(store_id_input))
+    cat_id_emb = Flatten()(Embedding(6, 1)(cat_id_input))
+    state_id_emb = Flatten()(Embedding(3, 1)(state_id_input))
+    
+
+    x = Concatenate(-1)([inputs, wday_emb, month_emb, month_emb, year_emb, mday_emb, \
+                        quarter_emb, event_name_1_emb, event_type_1_emb, event_name_2_emb, \
+                        event_type_2_emb, item_id_emb, dept_id_emb, store_id_emb, cat_id_emb, \
+                        state_id_emb])
+
+    x = Dense(1024, activation='relu')(x)
+    x = BatchNormalization()(x)
+    x = Dense(512, activation='relu')(x)
+    x = BatchNormalization()(x)        
+    x = Dense(256, activation='relu')(x)
+    x = BatchNormalization()(x)
+    x = Dense(128, activation='relu')(x)
+
+    x_deep = Dense(64, activation='relu')(x)
+    x_deep = BatchNormalization()(x_deep)
+    x_deep = Dense(128, activation='relu')(x_deep)
+    x_deep = BatchNormalization()(x_deep)
+    x_deep = Dense(256, activation='relu')(x_deep)
+
+    x = Concatenate(-1)([inputs, x])
+    x_res = Dense(64, activation='relu')(x)
+    x_res = BatchNormalization()(x_res)
+    x_res = Dense(128, activation='relu')(x_res)
+    x_res = BatchNormalization()(x_res)
+    x_res = Dense(256, activation='relu')(x_res)
+
+    x = Concatenate(-1)([x_deep, x_res])
+
+    outputs = Dense(1, activation='linear')(x)
+    # outputs = resnet_v2(x)
+    
+    optimizer = Adam(lr=lr)#Adam(lr=lr)
+    input_dic = {
+        'inputs': inputs, 'wday': wday_input, 'month': month_input, 'year': year_input,
+        'mday': mday_input, 'quarter': quarter_input, 'event_name_1': event_name_1_input,
+        'event_type_1': event_type_1_input, 'event_name_2': event_name_2_input,
+        'event_type_2': event_type_2_input, 'item_id': item_id_input, 'dept_id': dept_id_input,
+        'store_id': store_id_input, 'cat_id': cat_id_input, 'state_id': state_id_input,
+
+    }
+    model = Model(input_dic, outputs, name='predict_model')
+    model.compile(optimizer=optimizer, loss=wrmsse)
     return model    
 
 class M5_predict:
-    def __init__(self, input_size, batch_size=2**14, epochs=200):
+    def __init__(self, input_size, cat_id, batch_size=3049, epochs=200):
         self.batch_size = batch_size
         self.epochs = epochs        
         self.model = predict_model(input_size)
+        self.cat_id = cat_id
         
-    def train(self, X_train, y_train):
-        model_path = './m5_predict5.h5'  # '{epoch:02d}-{val_loss:.4f}.h5'
+    # def train(self, X_train, y_train, val_data):
+    #     model_path = './m5_predict5' + str(self.cat_id) + '.h5'  # '{epoch:02d}-{val_loss:.4f}.h5'
+    #     cb_checkpoint = ModelCheckpoint(filepath=model_path, monitor='val_loss', verbose=1, save_best_only=True)
+    #     early_stopping = EarlyStopping(patience=10)
+    #     print('lenght :', X_train['inputs'].shape)
+    #     history = self.model.fit(X_train, y_train, batch_size=self.batch_size, epochs=self.epochs, verbose=1, #shuffle=True,
+    #                             validation_data = val_data, #validation_split=0.2,
+    #                            callbacks=[cb_checkpoint, early_stopping])  # , class_weight=class_weights) 
+    def train(self, train_gen, val_gen):
+        model_path = './m5_predict5' + str(self.cat_id) + '.h5'  # '{epoch:02d}-{val_loss:.4f}.h5'
         cb_checkpoint = ModelCheckpoint(filepath=model_path, monitor='val_loss', verbose=1, save_best_only=True)
         early_stopping = EarlyStopping(patience=10)
-        
-        history = self.model.fit(X_train, y_train, batch_size=self.batch_size, epochs=self.epochs, verbose=1, shuffle=True,
-                              validation_split=0.2,
+        # print('lenght :', X_train['inputs'].shape)
+        history = self.model.fit(train_gen, epochs=self.epochs, verbose=1, #shuffle=True,
+                                validation_data = val_gen, #validation_split=0.2,
                                callbacks=[cb_checkpoint, early_stopping])  # , class_weight=class_weights) 
+
+class M5_classifier(M5_predict):
+    def __init__(self, input_size, cat_id, batch_size=2**14, epochs=200):
+        self.batch_size = batch_size
+        self.epochs = epochs        
+        self.model = classification_model(input_size)
+        self.cat_id = cat_id
+
 
 import pickle
 import gzip
@@ -393,7 +551,8 @@ train_columns = ['item_id', 'dept_id', 'store_id', 'cat_id', 'state_id', 'wday',
                 'rmean_7_14', 'rmean_14_14', 'rmean_21_14', 'rmean_28_14', \
                 'rmean_7_21', 'rmean_14_21', 'rmean_21_21', 'rmean_28_21', \
                 'rmean_7_28', 'rmean_14_28', 'rmean_21_28', 'rmean_28_28', 'week', \
-                'quarter', 'mday', 'sales_before']
+                'quarter', 'mday', 'sales_before_2', 'sales_before_3', \
+                'sales_before_4', 'sales_before_5', 'sales_before_6']
 
 def create_lag_features_for_test(dt, day):
     # create lag feaures just for single day (faster)
@@ -409,7 +568,8 @@ def create_lag_features_for_test(dt, day):
             df_window = dt[(dt.date <= day-timedelta(days=lag)) & (dt.date > day-timedelta(days=lag+window))]
             df_window_grouped = df_window.groupby("id").agg({'sales':'mean'}).reindex(dt.loc[dt.date==day,'id'])
             dt.loc[dt.date == day,f"rmean_{lag}_{window}"] = df_window_grouped.sales.values   
-    dt['sales_before'] = dt.groupby(by='id')['sales'].shift(periods=1) / 800
+    for i in range(6):
+        dt['sales_before_' + str(i+1)] = dt.groupby(by='id')['sales'].shift(periods=i+1)
 
 def create_date_features_for_test(dt):
     # copy of the code from `create_dt()` above
@@ -435,10 +595,20 @@ input_dense = [ 'snap_CA', 'snap_TX', \
                 'rmean_7_14', 'rmean_14_14', 'rmean_21_14', 'rmean_28_14', \
                 'rmean_7_21', 'rmean_14_21', 'rmean_21_21', 'rmean_28_21', \
                 'rmean_7_28', 'rmean_14_28', 'rmean_21_28', 'rmean_28_28', \
-                'week', 'sales_before']
+                'week', 'sales_before_1', 'sales_before_2', 'sales_before_3', \
+                'sales_before_4', 'sales_before_5', 'sales_before_6']
 cat_cols = ['item_id', 'dept_id', 'store_id', 'cat_id', 'state_id', 'wday', 'month', 'year',\
             'event_name_1', 'event_type_1', 'event_name_2', 'event_type_2', 'quarter', 'mday']                
                 
+def make_X_class(df):
+    X = {'inputs': df[input_dense].to_numpy()}
+    for i, v in enumerate(cat_cols):
+        if v in ['wday', 'mday', 'quarter']:
+            X[v] = df[[v]].to_numpy() - 1
+        else:
+            X[v] = df[[v]].to_numpy()
+    return X
+
 def make_X(df):
     X = {'inputs': df[input_dense].to_numpy()}
     for i, v in enumerate(cat_cols):
@@ -448,6 +618,47 @@ def make_X(df):
             X[v] = df[[v]].to_numpy()
     return X
 
+def train_classifier():
+    try:
+        df = pd.read_pickle('train_data_df.pkl')
+    except:
+        FIRST_DAY =  350# If you want to load all the data set it to '1' -->  Great  memory overflow  risk !
+        df = create_dt(is_train=True, first_day= FIRST_DAY)
+        create_fea(df)
+        df.dropna(inplace = True)
+        df.to_pickle('train_data_df.pkl')
+
+    cat_id = 55
+    test = M5_classifier(len(input_dense), cat_id) 
+    class_data = df.sales.values
+    class_data[class_data != 0] = 1
+    test.train(make_X_class(df), class_data)
+
+def fill_class():
+    from tqdm import tqdm
+    try:
+        df = pd.read_pickle('train_data_df.pkl')
+    except:
+        FIRST_DAY =  350# If you want to load all the data set it to '1' -->  Great  memory overflow  risk !
+        df = create_dt(is_train=True, first_day= FIRST_DAY)
+        create_fea(df)
+        df.dropna(inplace = True)
+        df.to_pickle('train_data_df.pkl')
+
+    test = M5_classifier(len(input_dense), 55) 
+    test.model.load_weights('m5_predict555.h5')
+    
+    df['class'] = np.zeros(len(df))
+
+    batch_size = 2**14
+    for i in tqdm(range(len(df) // batch_size + 1)):
+        tmp_np = test.model.predict_on_batch(make_X_class(df[i * batch_size : (i+1) * batch_size])).numpy()
+        tmp_np[tmp_np < 0.5] = 0
+        tmp_np[tmp_np >= 0.5] = 1
+        df.loc[df.index[i * batch_size : (i+1) * batch_size], 'class'] = tmp_np
+
+    df.to_pickle('train_data_df.pkl')
+
 def train():
     try:
         # with gzip.open('train_data.pkl', 'rb') as f:
@@ -455,7 +666,7 @@ def train():
         df = pd.read_pickle('train_data_df.pkl')
 
     except:
-        FIRST_DAY =  1# If you want to load all the data set it to '1' -->  Great  memory overflow  risk !
+        FIRST_DAY =  350# If you want to load all the data set it to '1' -->  Great  memory overflow  risk !
 
         df = create_dt(is_train=True, first_day= FIRST_DAY)
         create_fea(df)
@@ -474,22 +685,40 @@ def train():
 
     # print(y_train.shape)
 
-    test = M5_predict(len(input_dense))
-    # test.model.load_weights('./m5_predict4.h5')
-    # df['sell_price'] = df['sell_price'] / 110
-    # df['rmean_7_7'] = df['rmean_7_7'] / 603
-    # df['rmean_7_7'] = df['rmean_28_7'] / 603
-    # df['rmean_7_7'] = df['rmean_7_28'] / 443
-    # df['rmean_7_7'] = df['rmean_28_28'] / 443
-    # df['sales_before'] = df['sales_before'] * 800
-    test.train(make_X(df), df[['sales', 'sales_diff_year']].to_numpy())
+    cat_id = 0
+    test = M5_predict(len(input_dense), cat_id)    
+
+    # df = df.sort_values(by='store_id')
+    # df = df.sort_values(by='date')
+    # X_train = make_X(df)
+    # y_train = df[['sales', 'sales_diff_year', 'sales_price_86']].to_numpy()
+    # X_val_data = make_X(df[-3049 * 28:])
+    # y_val_data = df[-3049 * 28:][['sales', 'sales_diff_year', 'sales_price_86']].to_numpy()
+
+    train_gen = DataGenerator(df)
+    val_gen = DataGenerator(df[df.d > 'd_1870'])
+    
+    # test.train(X_train, y_train, (X_val_data, y_val_data))
+    test.train(train_gen, val_gen)
+    # test.train(make_X(df[(df.cat_id == cat_id)]), df[(df.cat_id == cat_id)][['sales', 'sales_diff_year']].to_numpy())
+
+    # test = M5_classifier(len(input_dense) + 1, cat_id) 
+    # class_data = df[(df.cat_id == cat_id)].sales.values
+    # class_data[class_data != 0] = 1
+    # test.train(make_X(df[(df.cat_id == cat_id)]), class_data)
 
 def test():    
-    with gzip.open('train_data.pkl', 'rb') as f:
-        X_train, y_train, max_data, max_label = pickle.load(f)
+    # with gzip.open('train_data.pkl', 'rb') as f:
+    #     X_train, y_train, max_data, max_label = pickle.load(f)
 
-    test = M5_predict(len(input_dense))
-    test.model.load_weights('./m5_predict5.h5')
+    test_0 = M5_predict(len(input_dense), 0)
+    test_0.model.load_weights('./m5_predict50.h5')
+    # test_1 = M5_predict(len(input_dense) + 1, 1)
+    # test_1.model.load_weights('./m5_predict51.h5')
+    # test_2 = M5_predict(len(input_dense) + 1, 2)
+    # test_2.model.load_weights('./m5_predict52.h5')
+    # class_ = M5_classifier(len(input_dense), 55)
+    # class_.model.load_weights('./m5_predict555.h5')
 
     te0 = create_dt(False)  # create master copy of `te`
 
@@ -508,8 +737,19 @@ def test():
         # create_fea(tst)  # correct, but takes much time
         create_lag_features_for_test(tst, day)  # faster  
         # tst = tst.loc[tst.date == day, train_columns]
-        # tst['sales_before'] = tst['sales_before'] * 800
-        te.loc[te.date == day, "sales"] = test.model.predict(make_X(tst[tst.date == day]))
+        # tst['sales_before'] = tst['sales_before'] * 800        
+        # print(test_0.model.predict(make_X(tst[(tst.date == day) & (tst.cat_id == 0)])).shape, len(te.loc[(te.date == day, "sales") & (te.cat_id == 0)]))
+        
+        # tst['class'] = np.zeros(len(tst))
+        # tmp_np = class_.model.predict_on_batch(make_X_class(tst[tst.date == day])).numpy()
+        # tmp_np[tmp_np < 0.5] = 0
+        # tmp_np[tmp_np >= 0.5] = 1
+        # tst.loc[tst[tst.date == day].index, 'class'] = tmp_np
+        
+        te.loc[((te.date == day), "sales")] = test_0.model.predict(make_X(tst[(tst.date == day)])) 
+        # te.loc[((te.date == day) & (te.cat_id == 0), "sales")] = test_0.model.predict(make_X(tst[(tst.date == day) & (tst.cat_id == 0)])) * 10
+        # te.loc[((te.date == day) & (te.cat_id == 1), "sales")] = test_1.model.predict(make_X(tst[(tst.date == day) & (tst.cat_id == 1)])) * 10
+        # te.loc[((te.date == day) & (te.cat_id == 2), "sales")] = test_2.model.predict(make_X(tst[(tst.date == day) & (tst.cat_id == 2)])) * 10
         # print(test.model.predict_on_batch(tst))
 
     print(te[['d', 'date']])
@@ -549,5 +789,8 @@ def test():
     result.to_csv('submission.csv', index=False)
 
 
-test()
+
+# train_classifier()
+# fill_class()
 # train()
+test()

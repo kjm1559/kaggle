@@ -5,6 +5,12 @@ import tensorflow.keras as keras
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.externals import joblib
 
+# feature 
+from sklearn.feature_selection import RFE
+from sklearn.svm import LinearSVC
+
+
+
 CAL_DTYPES={"event_name_1": "category", "event_name_2": "category", "event_type_1": "category", 
          "event_type_2": "category", "weekday": "category", 'wm_yr_wk': 'int16', "wday": "int16",
         "month": "category", "year": "category", "snap_CA": "float32", 'snap_TX': 'float32', 'snap_WI': 'float32' }
@@ -105,15 +111,17 @@ def create_dt(is_train = True, nrows = None, first_day = 1200):
     if is_train:
         dt['sales_price'] = dt['sales'] * dt['sell_price']
         dt['sales_price_86'] = dt.groupby(by='id')['sales_price'].rolling(28).sum().reset_index(0, drop=True)
+        # dt['sales_price_86'] = dt.groupby(by='id')['sales_price'].cumsum()#.reset_index(0, drop=True)       
 
         # dt['sales_diff'] = dt.groupby(by='id')['sales'].diff().pow(2).shift(periods=1).rolling(28).sum() / 28
         dt['sales_diff'] = dt.groupby(by='id')['sales'].diff()
         dt['sales_diff'] = dt.groupby(by='id')['sales_diff'].shift(periods=1).pow(2)
         # dt['sales_diff_year'] = dt.groupby(by='id')['sales_diff'].rolling(28).mean().reset_index(0, drop=True)
-        dt['sales_diff_comsum'] = dt.groupby(by='id')['sales_diff'].cumsum().reset_index(0, drop=True)
+        dt['sales_diff_comsum'] = dt.groupby(by='id')['sales_diff'].cumsum()#.reset_index(0, drop=True)
         dt['sales_diff_group_count'] = dt.groupby(by='id').cumcount()
         dt['sales_diff_year'] = dt['sales_diff_comsum'] / dt['sales_diff_group_count']
         dt['sales_diff_year'] = np.sqrt(dt['sales_diff_year'])
+        # dt['sales_price_86'] = dt['sales_price_86'] / dt['sales_diff_group_count']
         # dt.drop(columns=['sales_diff_group_count'], inplace=True)
         dt.drop(index=dt[dt['sales_diff_year'] == 0].index, inplace=True)    
     return dt
@@ -172,31 +180,65 @@ from tensorflow.keras.callbacks import ModelCheckpoint
 from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras import backend as K
 from tensorflow.keras.regularizers import l2
+import tensorflow as tf
 
 def rmse(true, pred):
     assert pred.shape[0]==true.shape[0]
     loss_1 = K.sqrt(K.mean(K.square(true[:, 0:1] - pred) + 1e-18))
     return loss_1
 
+def rmse2(true, pred):
+    assert pred.shape[0]==true.shape[0]
+    loss_1 = K.sqrt(K.mean(K.square(true[:, 0:1] - pred) + 1e-18))
+    return loss_1 * true[:, 1:2] / K.sum(true[:, 1:2])
+
 def rmsse(true, pred):
     assert pred.shape[0]==true.shape[0]
     # min : 0.03571428571428571
-    loss_1 = K.sqrt(K.sum(K.square(true[:, 0:1] - pred)) / K.sum(true[:, 1:2]) + 1e-18)
+    loss_1 = K.sqrt((K.sum(K.square(true[:, 0:1] - pred))  + 1e-18) / K.sum(K.square(true[:, 1:2])))
     return loss_1    
+
+def tweedieloss(y_true, y_pred):
+    # print(y_true.shape, y_pred.shape)
+    p=0.85
+    loss1 = K.pow(y_true, 2-p)/((1-p) * (2-p))
+    loss2 = y_true * K.pow(y_pred, 1-p)/(1-p)
+    loss3 = K.pow(y_pred, 2-p)/(2-p)
+    dev = 2 * (loss1 - loss2 + loss3)
+    return K.mean(dev)
+    
+def tweedieloss_09(y_true, y_pred):
+    # print(y_true.shape, y_pred.shape)
+    p=1.2
+    loss1 = K.pow(y_true, 2-p)/((1-p) * (2-p))
+    loss2 = y_true * K.pow(y_pred + 1e-1, 1-p)/(1-p)
+    loss3 = K.pow(y_pred + 1e-1, 2-p)/(2-p)
+    dev = 2 * (loss1 - loss2 + loss3)
+    return K.mean(dev)
+
+def tweedieloss_07(y_true, y_pred):
+    # print(y_true.shape, y_pred.shape)
+    p=1.8
+    loss1 = K.pow(y_true, 2-p)/((1-p) * (2-p))
+    loss2 = y_true * K.pow(y_pred + 1e-1, 1-p)/(1-p)
+    loss3 = K.pow(y_pred + 1e-1, 2-p)/(2-p)
+    dev = 2 * (loss1 - loss2 + loss3)
+    return K.mean(dev)
 
 def wrmsse(true, pred):
     assert pred.shape[0]==true.shape[0]
-    msse = K.sqrt(K.square(true[:, 0:1] - pred) / (true[:, 1:2] + 1e-18) + 1e-18)
-    sales_sum = K.sum(true[:, 2:3]) + 1e-19 # 같은 제품일 경우 고려, 기간이 같아야함
-    loss = K.sum((msse * true[:, 2:3])) / sales_sum
-    # msse_2 = K.sum(K.square(true[:, 0:1] - pred)) / (K.sum(true[:, 1:2] + 1e-18))
-    # rmsse_total = K.sqrt(msse_2 + 1e-18) # rmsse
-    rmsse_total = K.sqrt(K.sum(msse) + 1e-18)
+    msse = K.sqrt((K.square(true[:, 0:1] - pred) + 1e-18) / K.square(true[:, 1:2]))
+    sales_sum = K.sum(true[:, 2:3]) # 같은 제품일 경우 고려, 기간이 같아야함
+    loss = K.sum(msse * true[:, 2:3] / sales_sum) 
+    msse_2 = (K.sum(K.square(true[:, 0:1] - pred)) + 1e-18) / K.sum(K.square(true[:, 1:2]))
+    rmsse_total = K.sqrt(msse_2) # rmsse
+    # rmsse_total = K.sum(K.sqrt(msse + 1e-18))
     return (loss + rmsse_total) / 2 # aggregation level = 2
+    # return loss
 
 # mse, rmsse, wrmsse ensemble model make ->
 
-def predict_model(input_size, epochs=200, lr=1e-3):    
+def predict_model(input_size, epochs=200, lr=1e-1):    
     inputs = Input(shape=input_size, name='inputs')
 
     # Embedding input
@@ -236,35 +278,48 @@ def predict_model(input_size, epochs=200, lr=1e-3):
     state_id_emb = Flatten()(Embedding(3, 1)(state_id_input))
     
 
-    x = Concatenate(-1)([inputs, wday_emb, month_emb, month_emb, year_emb, mday_emb, \
+    input_data = Concatenate(-1)([inputs, wday_emb, month_emb, month_emb, year_emb, mday_emb, \
                         quarter_emb, event_name_1_emb, event_type_1_emb, event_name_2_emb, \
                         event_type_2_emb, item_id_emb, dept_id_emb, store_id_emb, cat_id_emb, \
                         state_id_emb])
 
-    x = Dense(1024, activation='relu')(x)
-    x = BatchNormalization()(x)
-    x = Dense(512, activation='relu')(x)
-    x = BatchNormalization()(x)        
+    # x = Dense(1024, activation='relu')(x)
+    # x = BatchNormalization()(x)
+    x = Dense(512, activation='relu')(input_data)
+    x = BatchNormalization()(x)  
+    x = Dropout(0.3)(x)      
     x = Dense(256, activation='relu')(x)
     x = BatchNormalization()(x)
+    x = Dropout(0.3)(x)
     x = Dense(128, activation='relu')(x)
 
     x_deep = Dense(64, activation='relu')(x)
     x_deep = BatchNormalization()(x_deep)
-    x_deep = Dense(128, activation='relu')(x_deep)
-    x_deep = BatchNormalization()(x_deep)
-    x_deep = Dense(256, activation='relu')(x_deep)
+    x_deep = Dropout(0.3)(x_deep)
+    # x_deep = Dense(128, activation='relu')(x_deep)
+    # x_deep = BatchNormalization()(x_deep)
+    # x_deep = Dropout(0.3)(x_deep)
+    x_deep = Dense(input_data.shape[1], activation='relu')(x_deep)
 
-    x = Concatenate(-1)([inputs, x])
-    x_res = Dense(64, activation='relu')(x)
-    x_res = BatchNormalization()(x_res)
-    x_res = Dense(128, activation='relu')(x_res)
-    x_res = BatchNormalization()(x_res)
-    x_res = Dense(256, activation='relu')(x_res)
+    # x = Concatenate(-1)([inputs, x])
+    # x_res = Dense(64, activation='relu')(x)
+    # x_res = BatchNormalization()(x_res)
+    # # x_deep = Dropout(0.3)(x_res)
+    # x_res = Dense(128, activation='relu')(x_res)
+    # x_res = BatchNormalization()(x_res)
+    # # x_res = Dropout(0.3)(x_res)
+    # x_res = Dense(256, activation='relu')(x_res)
 
-    x = Concatenate(-1)([x_deep, x_res])
+    # x = Concatenate(-1)([x_deep, x_res])
+    x = input_data + x_deep
 
-    outputs = Dense(1, activation='sigmoid')(x)
+    x = Dense(32, activation='relu')(x)
+    x = BatchNormalization()(x)
+    x_deep = Dropout(0.3)(x_deep)
+    x = Dense(16, activation='relu')(x)
+    
+
+    outputs = Dense(1, activation='relu')(x)
     # outputs = resnet_v2(x)
     
     # optimizer = Adam(lr=lr)#Adam(lr=lr)
@@ -304,14 +359,14 @@ class M5_predict_ensemble_model:
     #                            callbacks=[cb_checkpoint, early_stopping])  # , class_weight=class_weights) 
 
 class M5_predict:
-    def __init__(self, input_size, batch_size=3049, epochs=200, lr=1e-3):
+    def __init__(self, input_size, batch_size=2**14, epochs=200, lr=1e-3):
         self.batch_size = batch_size
         self.epochs = epochs        
         self.model = predict_model(input_size)              
         self.optimizer = Adam(lr=lr)
         
     def train_mse(self, X_train, y_train):
-        self.model.compile(optimizer=self.optimizer, loss=rmse)
+        self.model.compile(optimizer=self.optimizer, loss=tweedieloss)
         model_path = './m5_predict5_mse.h5'  # '{epoch:02d}-{val_loss:.4f}.h5'
         cb_checkpoint = ModelCheckpoint(filepath=model_path, monitor='val_loss', verbose=1, save_best_only=True)
         early_stopping = EarlyStopping(patience=10)
@@ -321,7 +376,7 @@ class M5_predict:
                                 callbacks=[cb_checkpoint, early_stopping])  # , class_weight=class_weights) 
 
     def train_rmsse(self, X_train, y_train):
-        self.model.compile(optimizer=self.optimizer, loss=rmsse)
+        self.model.compile(optimizer=self.optimizer, loss=tweedieloss_09)
         model_path = './m5_predict5_rmsse.h5'  # '{epoch:02d}-{val_loss:.4f}.h5'
         cb_checkpoint = ModelCheckpoint(filepath=model_path, monitor='val_loss', verbose=1, save_best_only=True)
         early_stopping = EarlyStopping(patience=10)
@@ -330,15 +385,24 @@ class M5_predict:
                                 validation_split=0.2,
                                 callbacks=[cb_checkpoint, early_stopping])  # , class_weight=class_weights) 
 
-    def train_wrmsse(self, train_gen, val_gen):
-        self.model.compile(optimizer=self.optimizer, loss=wrmsse)
+    # def train_wrmsse(self, train_gen, val_gen):
+    #     self.model.compile(optimizer=self.optimizer, loss=wrmsse)
+    #     model_path = './m5_predict5_wrmsse.h5'  # '{epoch:02d}-{val_loss:.4f}.h5'
+    #     cb_checkpoint = ModelCheckpoint(filepath=model_path, monitor='val_loss', verbose=1, save_best_only=True)
+    #     early_stopping = EarlyStopping(patience=10)
+    #     # print('lenght :', X_train['inputs'].shape)
+    #     history = self.model.fit(train_gen, epochs=self.epochs, verbose=1, #shuffle=True,
+    #                             validation_data = val_gen, #validation_split=0.2,
+    #                            callbacks=[cb_checkpoint, early_stopping])  # , class_weight=class_weights) 
+    def train_wrmsse(self, X_train, y_train):
+        self.model.compile(optimizer=self.optimizer, loss=rmse)
         model_path = './m5_predict5_wrmsse.h5'  # '{epoch:02d}-{val_loss:.4f}.h5'
         cb_checkpoint = ModelCheckpoint(filepath=model_path, monitor='val_loss', verbose=1, save_best_only=True)
         early_stopping = EarlyStopping(patience=10)
-        # print('lenght :', X_train['inputs'].shape)
-        history = self.model.fit(train_gen, epochs=self.epochs, verbose=1, #shuffle=True,
-                                validation_data = val_gen, #validation_split=0.2,
-                               callbacks=[cb_checkpoint, early_stopping])  # , class_weight=class_weights) 
+        print('lenght :', X_train['inputs'].shape)
+        history = self.model.fit(X_train, y_train, batch_size=self.batch_size, epochs=self.epochs, verbose=1, shuffle=True,
+                                validation_split=0.2,
+                                callbacks=[cb_checkpoint, early_stopping])  # , class_weight=class_weights) 
 
 
 
@@ -397,9 +461,9 @@ input_dense = [ 'snap_CA', 'snap_TX', \
                 'rmean_7_21', 'rmean_14_21', 'rmean_21_21', 'rmean_28_21', \
                 'rmean_7_28', 'rmean_14_28', 'rmean_21_28', 'rmean_28_28',
                 'week', 'sales_before_2', 'sales_before_3', \
-                'sales_before_4', 'sales_before_5', 'sales_before_6']
+                'sales_before_4', 'sales_before_5', 'sales_before_6', 'sales_lgb_1']
 cat_cols = ['item_id', 'dept_id', 'store_id', 'cat_id', 'state_id', 'wday', 'year', 'month',\
-            'event_name_1', 'event_type_1', 'event_name_2', 'event_type_2', 'quarter', 'mday']                
+            'event_name_1', 'event_type_1', 'event_name_2', 'event_type_2', 'quarter', 'mday']
                 
 def make_X_class(df):
     X = {'inputs': df[input_dense].to_numpy()}
@@ -421,7 +485,7 @@ def make_X(df):
 
 def train(loss='mse'):
     try:
-        df = pd.read_pickle('train_data_df.pkl')
+        df = pd.read_pickle('train_data_df_lgb.pkl')
     except:
         FIRST_DAY =  350# If you want to load all the data set it to '1' -->  Great  memory overflow  risk !
 
@@ -444,20 +508,31 @@ def train(loss='mse'):
     print('normalization', min_max_scaler.data_min_, min_max_scaler.data_max_)
     
     # df[input_dense + ['sales', 'sales_diff_year', 'sales_price_86']] = min_max_scaler.transform(df[input_dense + ['sales', 'sales_diff_year', 'sales_price_86']])
-    df[input_dense + ['sales']] = (df[input_dense + ['sales']] - min_max_scaler.data_min_) /(min_max_scaler.data_max_-min_max_scaler.data_min_)
+    # df[input_dense + ['sales']] = (df[input_dense + ['sales']] - min_max_scaler.data_min_) /(min_max_scaler.data_max_-min_max_scaler.data_min_)
         
     if loss == 'mse':
         test = M5_predict(len(input_dense), 2**14)
-        test.train_mse(make_X(df), df[['sales']].to_numpy())
+        test.train_mse(make_X(df), df['sales'].to_numpy())
     elif loss == 'rmsse':
         test = M5_predict(len(input_dense), 2**14)
-        test.train_rmsse(make_X(df), df[['sales', 'sales_diff_year']].to_numpy())
+        test.train_rmsse(make_X(df), df[['sales']].to_numpy())
     elif loss == 'wrmsse':
-        test = M5_predict(len(input_dense))
-        train_gen = DataGenerator(df)
-        val_gen = DataGenerator(df[df.d > 'd_1870'])
-        test.train_wrmsse(train_gen, val_gen)
+        # test = M5_predict(len(input_dense))
+        # train_gen = DataGenerator(df)
+        # # val_gen = DataGenerator(df)
+        # test.train_wrmsse(train_gen, train_gen)
+        test = M5_predict(len(input_dense), 2**14)
+        test.train_wrmsse(make_X(df), df[['sales']].to_numpy())
     else:
+        # clf = LinearSVC(C=0.01, penalty='l1', dual=False)
+        # clf.fit(df[input_dense + cat_cols], df['sales'])
+
+        # rfe_selector = RFE(clf, 10)
+        # rfe_selector = rfe_selector.fit(df[input_dense + cat_cols], df['sales'])
+
+        # rfe_values = rfe_selector.get_support()
+        # print(rfe_values)
+
         test = M5_predict_ensemble_model(len(input_dense))
         # train_gen = DataGenerator(df)
         # val_gen = DataGenerator(df[df.d > 'd_1870'])
@@ -486,6 +561,7 @@ def define_ensemble_model(input_size, lr=1e-3):
     snap_CA_input = Input(shape=(1,), name='snap_CA')
     snap_TX_input = Input(shape=(1,), name='snap_TX')
     snap_WI_input = Input(shape=(1,), name='snap_WI')
+    lgb_input = Input(shape=(1,), name='sales_lgb_1')
 
 
     wday_emb = Flatten()(Embedding(7, 1)(wday_input))
@@ -519,6 +595,7 @@ def define_ensemble_model(input_size, lr=1e-3):
     }
 
     models = [predict_model(len(input_dense)), predict_model(len(input_dense)), predict_model(len(input_dense))]
+    # models = [predict_model(len(input_dense)), predict_model(len(input_dense))]
     models[0].load_weights('./m5_predict5_mse.h5')
     models[1].load_weights('./m5_predict5_rmsse.h5')
     models[2].load_weights('./m5_predict5_wrmsse.h5')
@@ -532,21 +609,25 @@ def define_ensemble_model(input_size, lr=1e-3):
     
     ensemble_outputs = [model(input_dic) for model in models]
     merge = Concatenate(-1)(ensemble_outputs)
-    merge = Concatenate(-1)([x, merge])
-    x = Dense(512, activation='relu')(merge)
-    x = BatchNormalization()(x)
-    x = Dense(256, activation='relu')(x)
-    x = BatchNormalization()(x)
-    x = Dense(128, activation='relu')(x)
-    x = BatchNormalization()(x)
-    x = Dense(1, activation='relu')(x)
-    x = Concatenate(-1)([x, merge])
-    x = Dense(32, activation='relu')(x)
-    x = BatchNormalization()(x)
-    outputs = Dense(1, activation='sigmoid')(x)
+    # merge = Concatenate(-1)([x, merge])
+    # x = Dense(1024, activation='relu')(merge)
+    # x = BatchNormalization()(x)
+    # x = Dense(512, activation='relu')(x)
+    # x = BatchNormalization()(x)
+    # x = Dense(256, activation='relu')(x)
+    # x = BatchNormalization()(x)
+    # x = Dense(128, activation='relu')(x)
+    # x = BatchNormalization()(x)
+    # x = Dense(36, activation='relu')(merge)
+    # x = BatchNormalization()(x)
+    # x = Dropout(0.3)(x)
+    # x = Dense(1, activation='relu')(x)
+    # x = Concatenate(-1)([x, merge])
+    # x = Dense(16, activation='relu')(x)
+    outputs = Dense(1, activation='relu')(merge)
 
     model = Model(inputs=input_dic, outputs=outputs)
-    model.compile(optimizer=Adam(lr=lr), loss=rmse)
+    model.compile(optimizer=Adam(lr=lr), loss=tweedieloss)
     return model
 
 def test():    
@@ -558,8 +639,8 @@ def test():
         print(fitted.data_max_)
         joblib.dump(min_max_scaler, 'min_max_data.pkl')
 
-    test_0 = M5_predict_ensemble_model(len(input_dense), 0)
-    test_0.model.load_weights('./m5_predict5_ensemble.h5')
+    test_0 = M5_predict(len(input_dense), 0)
+    test_0.model.load_weights('./m5_predict5_wrmsse.h5')
     # test_0 = M5_predict_ensemble_model(len(input_dense))
     # test_0.model.load_weights('./m5_predict5_ensemble.h5')
     # test_1 = M5_predict(len(input_dense) + 1, 1)
@@ -579,6 +660,8 @@ def test():
     # te['sales_price_86'] = np.zeros(len(te))
     cols = [f"F{i}" for i in range(1, 29)]
     print(te[['date', 'd']])
+    with open('model.pkl', 'rb') as fin:
+        m_lgb = pickle.load(fin)
 
     for tdelta in range(0, 28 + 28):
         day = fday + timedelta(days=tdelta)
@@ -597,9 +680,10 @@ def test():
         # tmp_np[tmp_np >= 0.5] = 1
         # tst.loc[tst[tst.date == day].index, 'class'] = tmp_np
         tmp_test_data = tst[(tst.date == day)]
-        tmp_test_data.loc[tmp_test_data.index, input_dense + ['sales']] = min_max_scaler.transform(tmp_test_data[input_dense + ['sales']])
+        # tmp_test_data.loc[tmp_test_data.index, input_dense + ['sales']] = min_max_scaler.transform(tmp_test_data[input_dense + ['sales']])
+        tmp_test_data["sales_lgb_1"] = m_lgb.predict(tmp_test_data[train_columns])
         tmp_test_data.loc[tmp_test_data.index, 'sales'] = test_0.model.predict(make_X(tmp_test_data))
-        tmp_test_data.loc[tmp_test_data.index, input_dense + ['sales']] = min_max_scaler.inverse_transform(tmp_test_data[input_dense + ['sales']])
+        # tmp_test_data.loc[tmp_test_data.index, input_dense + ['sales']] = min_max_scaler.inverse_transform(tmp_test_data[input_dense + ['sales']])
         te.loc[((te.date == day), "sales")] = tmp_test_data['sales']
         # te.loc[((te.date == day), "sales")] = test_0.model.predict(make_X(tst[(tst.date == day)])) * 800
         # te.loc[((te.date == day) & (te.cat_id == 0), "sales")] = test_0.model.predict(make_X(tst[(tst.date == day) & (tst.cat_id == 0)])) * 10
@@ -644,10 +728,8 @@ def test():
     result.to_csv('submission.csv', index=False)
 
 
-
-
 # train('mse')
 # train('rmsse')
 # train('wrmsse')
-train('e')
-# test()
+# train('e')
+test()

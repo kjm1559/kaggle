@@ -9,14 +9,17 @@ if gpus:
 import tensorflow_hub as hub
 import tensorflow as tf
 import tensorflow.keras as keras
-from tensorflow.keras.layers import Dense, Input
+from tensorflow.keras.layers import Dense, Input, BatchNormalization, Dropout, Flatten, Embedding
 from tensorflow.keras.models import Model
 import pandas as pd
 import numpy as np
 
+from tensorflow.keras.callbacks import ModelCheckpoint
+from tensorflow.keras.callbacks import EarlyStopping
+
 class DataGenerator(keras.utils.Sequence):
     'Generates data for Keras'
-    def __init__(self, df, batch_size=35, shuffle=True):
+    def __init__(self, df, batch_size=256, shuffle=True):
         'Initialization'
         # self.dim = dim
         # self.batch_size = batch_size
@@ -62,13 +65,23 @@ class DataGenerator(keras.utils.Sequence):
         for idata in self.df.loc[index].itertuples():
             X['input_word_ids'].append(list(idata.input_word_ids))
             X['input_mask'].append(list(idata.input_mask))
-            X['segment_ids'].append(list(idata.all_segment_id))
+            # X['segment_ids'].append(list(idata.all_segment_id))
         X['input_word_ids'] = np.array(X['input_word_ids'])
         X['input_mask'] = np.array(X['input_mask'])
-        X['segment_ids'] = np.array(X['segment_ids'])
+        # X['segment_ids'] = np.array(X['segment_ids'])
         y = self.df.loc[index]['toxic'].values
         return X, y
 
+def make_X(df):
+    dict_df = {}
+    # for columns in df.columns:
+    #     dict_df[columns] = df[columns].values
+    dict_df['input_word_ids'] = np.array([list(dd) for dd in df['input_word_ids'].values])
+    dict_df['input_mask'] = np.array([list(dd) for dd in df['input_mask'].values])
+    dict_df['segment_ids'] = np.array([list(dd) for dd in df['all_segment_id'].values])
+    # print(df['input_word_ids'].values.shape, df['input_word_ids'].values[0])
+    return dict_df
+    
 
 max_seq_length = 128  # Your choice here.
 input_word_ids = Input(shape=(max_seq_length,), dtype=tf.int32,
@@ -78,33 +91,79 @@ input_mask = Input(shape=(max_seq_length,), dtype=tf.int32,
 segment_ids = Input(shape=(max_seq_length,), dtype=tf.int32,
                                     name="segment_ids")
 # bert_layer = hub.KerasLayer("https://tfhub.dev/google/bert_cased_L-12_H-768_A-12/2", trainable=True)
-bert_layer = hub.KerasLayer("https://tfhub.dev/tensorflow/bert_multi_cased_L-12_H-768_A-12/2", trainable=True)
-# pooled_output, sequence_output = bert_layer([input_word_ids, input_mask, segment_ids])
-x, y = bert_layer([input_word_ids, input_mask, segment_ids])
+bert_layer = hub.KerasLayer("https://tfhub.dev/tensorflow/bert_multi_cased_L-12_H-768_A-12/2", trainable=False)
+pooled_output, sequence_output = bert_layer([input_word_ids, input_mask, segment_ids])
+# x, y = bert_layer([input_word_ids, input_mask, segment_ids])
+
+bert_model = Model(inputs=[input_word_ids, input_mask, segment_ids], outputs=[pooled_output, sequence_output])
+
+def attention_mechanism(days, input_):
+    x = Dense(256, activation='sigmoid')(input_)
+    x = Dense(days, activation='softmax')(x)
+    return x
+
+x = Embedding(120000, 128, input_length=128)(input_word_ids)
+
+x = attention_mechanism(128, x)
+x = Flatten()(x)
+# x = Dense(128, activation='relu')(x)
+# x = BatchNormalization()(x)
+# x = Dropout(0.25)(x)
+x = Dense(64, activation='relu')(x)
+x = BatchNormalization()(x)
+x = Dropout(0.25)(x)
 x = Dense(32, activation='relu')(x)
 outputs = Dense(1, activation='sigmoid')(x)
 
 
-model = Model(inputs=[input_word_ids, input_mask, segment_ids], outputs=outputs)
+# model = Model(inputs=[input_word_ids, input_mask, segment_ids], outputs=outputs)
+model = Model(inputs=[input_word_ids, input_mask], outputs=outputs)
 model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['acc'])
+
+
 
 # input_word_ids = []
 # input_word_ids = []
 # for 
 
-train_examples = pd.read_pickle('./outputs/jigsaw-unintended-bias-train-processed-seqlen128.pickle')
+# train_examples = pd.read_pickle('./outputs/jigsaw-unintended-bias-train-processed-seqlen128.pickle')
+
+try:
+    train_examples = pd.read_pickle('./outputs/jigsaw-toxic-comment-train-processed-seqlen128.pickle')
+except:
+    train_examples = pd.read_csv('jigsaw-toxic-comment-train-processed-seqlen128.csv', usecols=['input_word_ids', 'input_mask', 'toxic'])
+    train_examples['input_word_ids'] = [eval(dd) for dd in train_examples['input_word_ids'].values]
+    train_examples['input_mask'] = [eval(dd) for dd in train_examples['input_mask'].values]
+    # train_examples['all_segment_id'] = [eval(dd) for dd in train_examples['all_segment_id'].values]
+    train_examples.to_pickle('./outputs/jigsaw-toxic-comment-train-processed-seqlen128.pickle')
 
 train_gen = DataGenerator(train_examples)
 
-model.fit(train_gen)
+model_path = './toxic_classification.h5'  # '{epoch:02d}-{val_loss:.4f}.h5'
+cb_checkpoint = ModelCheckpoint(filepath=model_path, monitor='val_loss', verbose=1, save_best_only=True)
+early_stopping = EarlyStopping(patience=10)
+# model.fit(train_gen, validation_data=train_gen, epochs=20, callback=[cb_checkpoint, early_stopping])
+
+try:
+    test_examples = pd.read_pickle('./outputs/test-processed-seqlen128.pickle')
+except:
+    test_examples = pd.read_csv('test-processed-seqlen128.csv', usecols=['input_word_ids', 'input_mask', 'all_segment_id'])
+    test_examples['input_word_ids'] = [eval(dd) for dd in test_examples['input_word_ids'].values]
+    test_examples['input_mask'] = [eval(dd) for dd in test_examples['input_mask'].values]
+    test_examples['all_segment_id'] = [eval(dd) for dd in test_examples['all_segment_id'].values]
+    test_examples.to_pickle('./outputs/test-processed-seqlen128.pickle')
+
+print('translate start')
+trans = bert_model.predict(make_X(test_examples[:10]))
+print(np.argmax(trans[1][0][0]))
+print(np.argmax(trans[0][0]))
+print('translate end')
 
 
-# s = "This is a nice sentence."
-# stokens = tokenizer.tokenize(s)
-# stokens = ["[CLS]"] + stokens + ["[SEP]"]
+model.load_weights('./toxic_classification.h5')
+toxic = model.predict({'input_mask':test_examples['input_mask'], 'input_word_ids':trans})
 
-# input_ids = get_ids(stokens, tokenizer, max_seq_length)
-# input_masks = get_masks(stokens, max_seq_length)
-# input_segments = get_segments(stokens, max_seq_length)
 
-# pool_embs, all_embs = model.predict([[input_ids],[input_masks],[input_segments]])
+test_examples = pd.read_csv('test-processed-seqlen128.csv')
+test_examples['toxic'] = toxic
+test_examples.to_csv('test-processed-seqlen128.csv')

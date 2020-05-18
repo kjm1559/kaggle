@@ -55,7 +55,7 @@ class DataGenerator(keras.utils.Sequence):
         # tmp_df = self.df[self.df.d == self.list_IDs[index]]
         tmp_df = self.group_df.get_group(self.list_IDs[index])
         X = make_X(tmp_df)
-        y = np.concatenate((tmp_df[['sales', 'sales_diff_year', 'sales_price_86']].to_numpy(), np.ones((len(tmp_df), 1))), axis=-1)
+        y = tmp_df[['sales', 'sales_diff_year', 'sales_price_86']].to_numpy()
        
         return X, y
 
@@ -178,16 +178,18 @@ def rmse(true, pred):
 
 def rmsse(true, pred):
     assert pred.shape[0]==true.shape[0]
-    loss_1 = K.mean(K.sqrt(K.square(true[:, 0:1] - (pred * 800)) / K.clip(true[:, 1:2], 0.03571428571428571, K.max(true[:, 1:2])) + 1e-18))
+    # min : 0.03571428571428571
+    loss_1 = K.sqrt(K.sum(K.square(true[:, 0:1] - (pred * 800))) / K.sum(K.clip(true[:, 1:2], 0.03571428571428571, K.max(true[:, 1:2]))) + 1e-18)
     return loss_1    
 
 def wrmsse(true, pred):
     assert pred.shape[0]==true.shape[0]
-    sqrt_data = K.sqrt(K.square(true[:, 0:1] - (pred * 800)) / K.clip(true[:, 1:2], 0.03571428571428571, K.max(true[:, 1:2])) + 1e-18) # 같은 제품일 경우 고려, 기간이 같아야함
-    sales_sum = K.sum(true[:, 2:3])
-    loss = K.sum((sqrt_data * true[:, 2:3]) / sales_sum)
-    rmsse = K.sum(sqrt_data) # rmsse
-    return (loss + rmsse) / K.sum(true[:, 3])
+    msse = K.sqrt(K.square(true[:, 0:1] - (pred * 800)) / K.clip(true[:, 1:2], 0.03571428571428571, K.max(true[:, 1:2])) + 1e-18)
+    sales_sum = K.sum(true[:, 2:3]) # 같은 제품일 경우 고려, 기간이 같아야함
+    loss = K.sum((msse * true[:, 2:3])) / sales_sum
+    msse_2 = K.sum(K.square(true[:, 0:1] - (pred * 800))) / K.sum(K.clip(true[:, 1:2], 0.03571428571428571, K.max(true[:, 1:2])))
+    rmsse_total = K.sqrt(msse_2 + 1e-18) # rmsse
+    return (loss + rmsse_total) / 2 # aggregation level = 2
 
 # mse, rmsse, wrmsse ensemble model make ->
 
@@ -281,14 +283,22 @@ class M5_predict_ensemble_model:
         self.epochs = epochs  
         self.batch_size = batch_size
     
-    def train(self, train_gen, val_gen):
+    def train(self, X_train, y_train):
         model_path = './m5_predict5_ensemble.h5'  # '{epoch:02d}-{val_loss:.4f}.h5'
         cb_checkpoint = ModelCheckpoint(filepath=model_path, monitor='val_loss', verbose=1, save_best_only=True)
         early_stopping = EarlyStopping(patience=10)
         # print('lenght :', X_train['inputs'].shape)
-        history = self.model.fit(train_gen, epochs=self.epochs, verbose=1, #shuffle=True,
-                                validation_data = val_gen, #validation_split=0.2,
-                               callbacks=[cb_checkpoint, early_stopping])  # , class_weight=class_weights) 
+        history = self.model.fit(X_train, y_train, batch_size=self.batch_size, epochs=self.epochs, verbose=1, shuffle=True,
+                                validation_split=0.2,
+                                callbacks=[cb_checkpoint, early_stopping])  # , class_weight=class_weights) 
+    # def train(self, train_gen, val_gen):
+    #     model_path = './m5_predict5_ensemble.h5'  # '{epoch:02d}-{val_loss:.4f}.h5'
+    #     cb_checkpoint = ModelCheckpoint(filepath=model_path, monitor='val_loss', verbose=1, save_best_only=True)
+    #     early_stopping = EarlyStopping(patience=10)
+    #     # print('lenght :', X_train['inputs'].shape)
+    #     history = self.model.fit(train_gen, epochs=self.epochs, verbose=1, #shuffle=True,
+    #                             validation_data = val_gen, #validation_split=0.2,
+    #                            callbacks=[cb_checkpoint, early_stopping])  # , class_weight=class_weights) 
 
 class M5_predict:
     def __init__(self, input_size, batch_size=3049, epochs=200, lr=1e-3):
@@ -431,10 +441,10 @@ def train(loss='mse'):
         test.train_wrmsse(train_gen, val_gen)
     else:
         test = M5_predict_ensemble_model(len(input_dense))
-        train_gen = DataGenerator(df)
-        val_gen = DataGenerator(df[df.d > 'd_1870'])
-        test.train(train_gen, val_gen)
-        # test.train(make_X(df), df[['sales']].to_numpy())
+        # train_gen = DataGenerator(df)
+        # val_gen = DataGenerator(df[df.d > 'd_1870'])
+        # test.train(train_gen, val_gen)
+        test.train(make_X(df), df[['sales']].to_numpy())
 
 def define_ensemble_model(input_size, lr=1e-3):
     try:
@@ -515,13 +525,20 @@ def define_ensemble_model(input_size, lr=1e-3):
     ensemble_outputs = [model(input_dic) for model in models]
     merge = Concatenate(-1)(ensemble_outputs)
     # merge = Concatenate(-1)([x, merge])
-    x = Dense(64, activation='relu')(merge)
+    x = Dense(512, activation='relu')(x)
     x = BatchNormalization()(x)
+    x = Dense(256, activation='relu')(x)
+    x = BatchNormalization()(x)
+    x = Dense(128, activation='relu')(x)
+    x = BatchNormalization()(x)
+    x = Dense(1, activation='relu')(x)
+    x = Concatenate(-1)([x, merge])
     x = Dense(32, activation='relu')(x)
-    outputs = Dense(1, activation='linear')(x)
+    x = BatchNormalization()(x)
+    outputs = Dense(1, activation='sigmoid')(x)
 
     model = Model(inputs=input_dic, outputs=outputs)
-    model.compile(optimizer=Adam(lr=lr), loss=wrmsse)
+    model.compile(optimizer=Adam(lr=lr), loss=rmse)
     return model
 
 def test():    
@@ -529,7 +546,7 @@ def test():
     #     X_train, y_train, max_data, max_label = pickle.load(f)
 
     # test_0 = M5_predict(len(input_dense), 0)
-    # test_0.model.load_weights('./m5_predict5_wrmsse.h5')
+    # test_0.model.load_weights('./m5_predict5_rmsse.h5')
     test_0 = M5_predict_ensemble_model(len(input_dense))
     test_0.model.load_weights('./m5_predict5_ensemble.h5')
     # test_1 = M5_predict(len(input_dense) + 1, 1)
@@ -610,8 +627,8 @@ def test():
 
 
 
-train('mse')
+# train('mse')
 # train('rmsse')
 # train('wrmsse')
-# train('e')
+train('e')
 # test()
