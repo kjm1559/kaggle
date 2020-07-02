@@ -8,3 +8,6 @@ M5 Forecaseting
     - output data sequence length : 1 month
 - predict sequence    
     1 month(28 days), total 2 month
+- private score
+    ![Alt score](./private_score.png)
+    rank : 72/5558
